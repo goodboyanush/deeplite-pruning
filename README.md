@@ -103,6 +103,7 @@ Serving 'vgg19_pruned.onnx' at http://localhost:8080
 ONNX has an inbuilt visualization using PyDot. The image of the pruned architecture is saved in the following file `pipeline_transpose2x.dot.png`
 
 ![Netron Plot](images/pydot_pruning.png?raw=true "Before and After Pruning")
+
 *Fig. 2: Visualization of the VGG architecture using PyDot after pruning*
 
 # Hard Assumptions
