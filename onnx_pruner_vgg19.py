@@ -35,6 +35,81 @@ def number_of_layers_to_prune(model, x, layer_type='Conv'):
     prune_count = math.floor(conv_count * (prune_percent/ 100))
     return prune_count
 
+def calc_dimension_change(size, op_type, node_params, node_inputs):
+    """
+    :param size: current running size (n-dimesnional tuple)
+    :param op_type: current operation being performed
+    :param node_params: parameters/attributes of the node being operated
+    :param node_input: input shapes to the current node
+    :return: updated new size
+    """
+    newSize = [0,0,0]
+    if (op_type == "Conv"):
+        params = {'dilations_row': 1, 'dilations_col': 1, 'kernel_shape_row': 3, 'kernel_shape_col': 3, 
+                  'pads_row': 0, 'pads_col': 0, 'strides_row': 1, 'strides_col': 1, "nb_filter": 64}
+        for i in node_inputs:
+            if i.name == node_params.input[1]:
+                nb_filter = i.type.tensor_type.shape.dim[0].dim_value
+        for i in node_params.attribute:
+            if (i.name == 'dilations'):
+                params['dilations_row'] = i.ints[0]
+                params['dilations_col'] = i.ints[1]
+            elif (i.name == 'kernel_shape'):
+                params['kernel_shape_row'] = i.ints[0]
+                params['kernel_shape_col'] = i.ints[1]
+            elif (i.name == 'pads'): # for now assume, that both start and end dimensions for each axis is the same
+                params['pads_row'] = i.ints[0]
+                params['pads_col'] = i.ints[2]
+            elif (i.name == 'strides'):
+                params['strides_row'] = i.ints[0]
+                params['strides_col'] = i.ints[1]
+    
+        newSize[1] = int((size[1] - params['kernel_shape_row'] + 2 * params['pads_row']) / params['strides_row'] + 1);
+        newSize[2] = int((size[2] - params['kernel_shape_col'] + 2 * params['pads_col']) / params['strides_col'] + 1);
+        newSize[0] = nb_filter;
+    
+    if (op_type == "MaxPool"):
+        params = {'dilations_row': 1, 'dilations_col': 1, 'kernel_shape_row': 3, 'kernel_shape_col': 3, 
+                  'pads_row': 0, 'pads_col': 0, 'strides_row': 1, 'strides_col': 1, "nb_filter": 64}
+        for i in node_params.attribute:
+            if (i.name == 'dilations'):
+                params['dilations_row'] = i.ints[0]
+                params['dilations_col'] = i.ints[1]
+            elif (i.name == 'kernel_shape'):
+                params['kernel_shape_row'] = i.ints[0]
+                params['kernel_shape_col'] = i.ints[1]
+            elif (i.name == 'pads'): # for now assume, that both start and end dimensions for each axis is the same
+                params['pads_row'] = i.ints[0]
+                params['pads_col'] = i.ints[2]
+            elif (i.name == 'strides'):
+                params['strides_row'] = i.ints[0]
+                params['strides_col'] = i.ints[1]
+    
+        newSize[1] = int((size[1] - params['kernel_shape_row'] + 2 * params['pads_row']) / params['strides_row'] + 1);
+        newSize[2] = int((size[2] - params['kernel_shape_col'] + 2 * params['pads_col']) / params['strides_col'] + 1);
+        newSize[0] = size[0];
+    
+    if (op_type == "Gemm"):
+        nb_nodes = 0
+        for i in node_inputs:
+            if i.name == node_params.input[1]:
+                nb_nodes = int(i.type.tensor_type.shape.dim[0].dim_value)
+        newSize = [1, nb_nodes]
+        
+    if (op_type == "Flatten"):
+        totalSize = 1
+        for i in size:
+            totalSize = totalSize * i
+        newSize = [1, totalSize]
+    
+    if (op_type == "Relu"):
+        newSize = size
+    
+    if (op_type == "Dropout"):
+        newSize = size
+        
+    return newSize
+
 def prune(model, x):
     """
     :param model: onnx model
@@ -45,11 +120,21 @@ def prune(model, x):
 
     prune_count = number_of_layers_to_prune(model, x, 'Conv')
 
+    # Assuming the shape is channel first
+    current_shape = [onnx_model.graph.input[0].type.tensor_type.shape.dim[1].dim_value, 
+                    onnx_model.graph.input[0].type.tensor_type.shape.dim[2].dim_value, 
+                    onnx_model.graph.input[0].type.tensor_type.shape.dim[3].dim_value]
+
     nodes = []
     all_inputs = []
     flag = True
     number_pruned = 0
+    print("Shape inference by walking through the original computational graph")
+    print("===================================================================")
+    print("Input Data Shape is: ", current_shape)
     for i in range(len(onnx_model.graph.node)):
+        current_shape = calc_dimension_change(current_shape, onnx_model.graph.node[i].op_type, onnx_model.graph.node[i], onnx_model.graph.input)
+        print("After Layer ", i, ": layer type: ", onnx_model.graph.node[i].op_type, ", shape is: ", current_shape)
         # If the current layer is Conv Layer, then the next layer can be skipped as it is already added
         if not flag:
             flag = True
@@ -76,7 +161,7 @@ def prune(model, x):
                 if curr_input != nodes[-1].output[0]:
                     for k, graph_input in enumerate(onnx_model.graph.input):
                         if graph_input.name == curr_input:
-                                all_inputs.append(onnx_model.graph.input[k])
+                            all_inputs.append(onnx_model.graph.input[k])
             
             # Recreate Learnable layers only to add the input parameters
             # FC/ Dense/ GEMM (General Matrix Multiplication) Layer
@@ -100,7 +185,6 @@ def prune(model, x):
             else:
                 nodes.append(onnx_model.graph.node[i])
 
-    # Create an ONNX Graph
     graph_def = helper.make_graph(
         nodes,
         'test-model',
@@ -108,18 +192,12 @@ def prune(model, x):
         onnx_model.graph.output
     )
 
-    # Create an ONNX Model
     model_def = helper.make_model(graph_def, producer_name='test-model')
 
-    # Perform Shape inference
-    try:
-        inferred_model = shape_inference.infer_shapes(model_def)
-    except:
-        print("Shape inference failed")
-
-    # Check the newly created ONNX model
-    print("Errors in the created ONNX model: ", onnx.checker.check_model(onnx_model))
-
+    inferred_model = shape_inference.infer_shapes(model_def)
+    print("===================================================================")
+    print("Is there any error in the recreated model: ", onnx.checker.check_model(inferred_model))
+    print("===================================================================")
     return inferred_model
 
 if __name__ == '__main__':
@@ -128,7 +206,10 @@ if __name__ == '__main__':
 
     inferred_model = prune(onnx_model, prune_percent)
 
+    print("===================================================================")
+    print("Saving the model ... ")
     onnx.save(inferred_model, 'vgg19_pruned.onnx')
+    print("===================================================================")
 
     ########################## Additional functions, hoping to impress :) #######################
     # If you want to visualize the ONNX model using NETRON
@@ -137,4 +218,19 @@ if __name__ == '__main__':
         import netron
         netron.start('vgg19_pruned.onnx', False, False, 8080)
 
+    # If you want to visualize the ONNX model using PyDot
+    from onnx.tools.net_drawer import GetPydotGraph, GetOpNodeProducer
+    pydot_graph = GetPydotGraph(inferred_model.graph, name=inferred_model.graph.name, rankdir="TB",
+                                node_producer=GetOpNodeProducer("docstring", color="yellow",
+                                                                fillcolor="yellow", style="filled"))
+    pydot_graph.write_dot("pipeline_transpose2x.dot")
+
+    import os
+    os.system('dot -O -Gdpi=500 -Tpng pipeline_transpose2x.dot')
+
+    import matplotlib.pyplot as plt
+    image = plt.imread("pipeline_transpose2x.dot.png")
+    fig, ax = plt.subplots(figsize=(400, 200))
+    ax.imshow(image)
+    ax.axis('off')
     
