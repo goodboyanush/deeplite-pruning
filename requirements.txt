@@ -1,4 +1,4 @@
-onnx==1.6.0
+onnx==1.13.0
 netron==3.5.6
 matplotlib==3.0.3
 pydot==1.4.1
